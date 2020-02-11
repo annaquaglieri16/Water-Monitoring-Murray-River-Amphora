@@ -1,0 +1,292 @@
+---
+title: "Exploratory analysis of the Albury time series data"
+author: Anna Quaglieri
+output: html_document
+---
+
+
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      prompt = TRUE,
+                      warning = FALSE, fig.path = "./figures/")
+
+library(tidyverse)
+library(lubridate)
+library(tsibble)
+library(fable)
+library(feasts)
+library(cowplot)
+library(here)
+library(hexbin)
+library(viridis)
+```
+
+# Water level data
+
+The data below refer to the historical data set of water at Murray basin at Albury back from 1885 (lat -36.0981, long 146.9065). The dataset is available through the Amphora website at https://beta.amphoradata.com/Amphorae/Detail?id=5602eb66-fb21-4350-9f68-0e5cbb925f62. 
+
+
+```{r create-data-tsibble,include=FALSE}
+Albury_historical <- read_csv(file.path(here(),"data/Albury_historical.csv"), col_names = FALSE, skip = 4,
+                              col_types = cols(X3 = col_double(), X4 = col_double()))
+summary(Albury_historical)
+
+# Convert first column to readable dates
+albury_time <- Albury_historical %>%
+  separate(X1, into = c("Time","Date"),sep=" ",remove = FALSE) %>%
+  mutate(Date = as.Date(Date,"%d/%m/%Y"),
+         Time = hms(Time)) 
+
+albury_time <- albury_time %>%
+  dplyr::select(Date,X2,X3,X4) %>%
+  dplyr::rename(wlevel = X2,
+                wsal = X3,
+                wtemp = X4) %>%
+  mutate(origin = "albury")
+
+twater <- albury_time %>% 
+  as_tsibble(index = Date)
+
+twater <- twater %>%
+  mutate(interval = case_when(Date < "1900-01-01" ~ "Before 1900",
+                              Date < "1940-01-01" & Date >= "1900-01-01"~ "1900-1940",
+                              Date >= "1940-01-01" & Date < "1980-01-01" ~ "1940-1980",
+                               Date >= "1980-01-01" ~ "1980-today",)) %>%
+  mutate(interval = factor(interval,levels=c("Before 1900","1900-1940","1940-1980","1980-today")))
+```
+
+
+# Time series of water level/salinity/temperature data
+
+```{r all-level-ts}
+p1=twater %>%
+  feasts::autoplot(wlevel) + ggtitle("Water level at Albury along the Murray river") + theme_classic()+ labs(x = "Years",y="Level (m)")
+
+p2=twater %>%
+  feasts::autoplot(wtemp) + theme_classic()+ labs(x = "Years",y="Temperature (Deg C)")
+
+p3=twater %>%
+  feasts::autoplot(wsal) +  theme_classic() + labs(x = "Years",y="Salinity (uS/cm)")
+
+plot_grid(p1,p2,p3,nrow=3)
+```
+
+
+```{r hist-wlevel, fig.height=3,fig.width=10}
+twater %>%
+  feasts::autoplot(wlevel) + 
+   autolayer(filter_index(twater, "2001-01-01" ~ "2007-12-31"), color = "#de2d26") +
+  ggtitle("Water level at Albury along the Murray river. Drought years 2001-2007 highlighted in red.") + 
+  theme_bw()+ labs(x = "Years",y="Level (m)")
+```
+
+
+# Zoomed time series of water salinity/temperature data
+
+```{r ts-after-2000}
+p3=twater %>%
+  filter(year(Date) > 2000) %>%
+  autoplot(wlevel) + ggtitle("Water level after year 2000")  + theme_bw()+
+   autolayer(filter_index(twater, "2015-01-01" ~ "2016-01-01"), color = "#de2d26") +
+  labs(x = "Years",y="Level (m)")
+
+p1=twater %>%
+  filter(year(Date) > 2000) %>%
+  autoplot(wtemp) + ggtitle("Water temperature after year 2000")  + theme_bw()+
+    autolayer(filter_index(twater[,c("Date","wtemp")], "2015-01-01" ~ "2016-01-01"), color = "#de2d26") +
+  labs(x = "Years",y="Temperature (Deg C)")
+
+p2=twater %>%
+  filter(year(Date) > 2000) %>%
+  autoplot(wsal) + ggtitle("Water salinity after year 2000")  + theme_bw() +
+    autolayer(filter_index(twater[,c("Date","wsal")], "2015-01-01" ~ "2016-01-01"), color = "#de2d26") +
+  labs(x = "Years",y="Salinity (uS/cm)")
+
+plot_grid(p3,p1,p2,nrow=3)
+```
+
+# Time series of water level data by year
+
+```{r water-level-year-interval}
+twater %>%
+  gg_season(wlevel, colour = "black",alpha=0.5) + ggtitle("Water level time series by intervals") + 
+  theme_bw() +
+  facet_wrap(~interval) + theme(legend.position = "none")+ labs(x = "Months",y="Level (m)")
+```
+
+
+```{r water-sal-2009}
+twater %>%
+  filter(year(Date) > 2009) %>%
+   mutate(year = year(Date)) %>%
+  gg_season(wsal,colour="black") + ggtitle("Water Salinity, between 2010-2019")  + theme_bw()+
+  labs(x = "Years",y="Salinity (uS/cm)")+ theme(legend.position = "none") +
+  facet_wrap(~year)
+
+```
+
+
+```{r water-temp-after2000}
+twater %>%
+  filter(year(Date) > 2000) %>%
+   mutate(year = year(Date)) %>%
+  gg_season(wtemp,alpha=0.7) + 
+  ggtitle("Water temperature, between 2001-2019")  + theme_bw()+
+  labs(x = "Years",y="Temperature (Deg C)") + theme(legend.position = "bottom")
+```
+
+
+# Correlations between water level and temperature/salinity
+
+```{r watertemp-waterlev}
+# Water levels vs water temperature
+twater %>%
+    mutate(year = year(Date),
+          month = month(Date),
+          day = day(Date)) %>%
+  filter(year >= 2000) %>%
+  mutate(Year = factor(year(Date))) %>%
+  ggplot(aes(x = wlevel, y = wtemp,colour=Year)) + 
+  geom_point(alpha=0.3,colour="grey") +
+  geom_smooth(se=FALSE)+
+  theme_bw() +
+  ggtitle("Water level vs water temperature (>2000)") +
+  labs(x = "Water level (m)", y = "Water temperature (Deg C)") +
+  theme(legend.position = "bottom")+
+  scale_color_viridis_d()
+```
+
+
+```{r watersal-waterlev}
+# Water levels vs water salinity
+twater %>%
+  filter(year(Date) > 2009) %>%
+  mutate(Year = factor(year(Date))) %>%
+  ggplot(aes(x = wlevel, y = wsal,colour=Year)) + 
+  geom_point(alpha=0.3) +
+  geom_smooth(se=FALSE) +
+  theme_bw()+
+  labs(x = "Water level (m)", y = "Water salinity (uS/cm)") +
+   ggtitle("Water level vs water salinity (>2010)") 
+
+```
+
+
+```{r water-lev-salt-month}
+# Water levels vs water salinity
+twater %>%
+  filter(year(Date) > 2000) %>%
+  mutate(Year = factor(year(Date)),
+         Month = factor(month(Date))) %>%
+  ggplot(aes(x = wlevel, y = wsal,colour=Month)) + 
+  geom_point(alpha=0.5) +
+  theme_bw()+
+  labs(x = "Water level (m)", y = "Water salinity (uS/cm)") +
+   ggtitle("Water level vs water salinity (>2010)")
+```
+
+# Scatterplot without stratifying by year/month
+
+```{r density-sal-water}
+# Water levels vs water salinity
+twater %>%
+  filter(year(Date) > 2000) %>%
+  mutate(Year = factor(year(Date))) %>%
+  ggplot(aes(x = wlevel, y = wsal)) + 
+   geom_hex(bins = 70) +
+  scale_fill_continuous(type = "viridis") +
+  theme_bw()+
+  labs(x = "Water level (m)", y = "Water salinity (uS/cm)") +
+   ggtitle("Water level vs water salinity (>2010)")
+
+```
+
+
+```{r density-temp-water}
+# Water levels vs water salinity
+twater %>%
+  filter(year(Date) > 2000) %>%
+  mutate(Year = factor(year(Date))) %>%
+  ggplot(aes(x = wlevel, y = wtemp)) + 
+   geom_hex(bins = 70) +
+  scale_fill_continuous(type = "viridis") +
+  theme_bw()+
+  labs(x = "Water level (m)", y = "Water temperature (Deg C)") +
+   ggtitle("Water level vs water temperature (>2010)")
+
+```
+
+
+```{r density-sal-water-nodens}
+# Water levels vs water salinity
+plot_sal <- twater %>%
+  filter(year(Date) > 2000) %>%
+  mutate(Year = factor(year(Date))) 
+
+plot_sal %>%
+  ggplot(aes(x = wlevel, y = log2(wsal))) + 
+  geom_point(alpha=0.3) +
+  geom_smooth(se=FALSE) +
+  geom_point(data = subset(plot_sal, Year %in% "2015"),colour="#de2d26",alpha=0.3) +
+  theme_bw()+
+  labs(x = "Water level (m)", y = "Water salinity (uS/cm)") +
+   ggtitle("Water level vs water salinity (>2010).\nYear 2015 highlighted in red")
+```
+
+
+```{r}
+# Water levels vs water salinity
+twater %>%
+  filter(year(Date) > 2000) %>%
+  mutate(Year = factor(year(Date)),
+         Month = factor(month(Date))) %>%
+  ggplot(aes(x = wlevel, y = wsal)) + 
+   geom_hex(bins=20) +
+  scale_fill_continuous(type = "viridis") +
+  theme_bw()+
+  facet_wrap(~Month) +
+  labs(x = "Water level (m)", y = "Water salinity (uS/cm)") +
+   ggtitle("Water level vs water salinity (>2010)")
+```
+
+
+# Min/max water temperature
+
+```{r}
+min_max <- twater %>%
+  as.data.frame() %>%
+  mutate(Year = year(Date)) %>%
+  filter(Year > 2000) %>%
+  group_by(Year) %>%
+  summarise(min_temp = min(wtemp,na.rm=TRUE),
+            max_temp = max(wtemp, na.rm=TRUE)) %>%
+  gather(key = summary, value = wtemp, min_temp,max_temp)
+```
+
+
+```{r min-max-ts}
+ggplot(min_max, aes(x = Year, y = wtemp,colour=summary)) + geom_point() +
+  geom_line() + theme_bw()
+```
+
+
+# Lag plots
+
+```{r}
+p1.data <- twater %>% 
+  filter(year(Date) > 2017) %>%
+  mutate(lag30.wlevel = c(diff(wlevel,lag=30),rep(NA,30)),
+         lag30.wtemp = c(diff(wtemp,lag = 30),rep(NA,30))) %>%
+  gather(key = measure, value = level,lag30.wlevel:lag30.wtemp)
+
+p1=twater %>%
+   filter(year(Date) > 2018) %>%
+  autoplot(wlevel)
+p2=twater %>%
+   filter(year(Date) > 2018) %>%
+  autoplot(wtemp)
+plot_grid(p1,p2,nrow=2)
+```
+
